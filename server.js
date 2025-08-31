@@ -231,4 +231,122 @@ STYLE
     "Approved links relevant to this question:\n" +
     urls.map((u) => `- ${u}`).join("\n");
 
-  const r = await fetch("https://api.openai.com/v1/chat/completions",
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0.3,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "assistant", content: contextMsg },
+        { role: "user", content: userMessage },
+      ],
+    }),
+  });
+
+  const data = await r.json();
+  if (!r.ok) {
+    console.error("OpenAI error:", data);
+    throw new Error("OpenAI request failed");
+  }
+  return data.choices?.[0]?.message?.content || "";
+}
+
+/* ------------------------------
+   POST /chat
+------------------------------ */
+app.post("/chat", async (req, res) => {
+  try {
+    const userMessage = (req.body && req.body.message) || "";
+    if (!userMessage) return res.status(400).json({ error: "Empty message" });
+
+    const urls = selectApprovedUrls(userMessage);
+    const reply = await askOpenAI(userMessage, urls);
+    return res.json({ reply });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* ------------------------------
+   OPTIONAL: External widget loader
+   (use if Divi strips inline <script>)
+   Add to your WP page:
+   <script src="https://canine-assistant.onrender.com/widget.js" defer></script>
+------------------------------ */
+app.get("/widget.js", (_req, res) => {
+  res.type("application/javascript").send(`
+    (function(){
+      var style=document.createElement('style');
+      style.innerHTML=[
+        "#chatButton{position:fixed;top:20px;right:20px;background:#4CAF50;color:#fff;border:none;border-radius:50%;width:60px;height:60px;font-size:28px;cursor:pointer;box-shadow:0 4px 6px rgba(0,0,0,.2);z-index:100000}",
+        "#chatWindow{display:none;position:fixed;top:90px;right:20px;width:350px;height:450px;background:#fff;border:1px solid #ccc;border-radius:12px;box-shadow:0 6px 12px rgba(0,0,0,.3);flex-direction:column;overflow:hidden;z-index:100000;font-family:Arial,sans-serif}",
+        "#chatHeader{background:#4CAF50;color:#fff;padding:10px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;position:relative}",
+        "#chatHeader .buttons{display:flex;gap:8px}",
+        "#chatHeader button{background:transparent;border:none;color:#fff;font-size:16px;cursor:pointer}",
+        "#notifDot{display:none;position:absolute;top:8px;right:70px;width:12px;height:12px;background:red;border-radius:50%}",
+        "#chatBody{flex:1;padding:10px;overflow-y:auto;font-size:14px;color:#222}",
+        "#chatBody .user{font-weight:bold;margin-top:10px}",
+        "#chatBody .bot{margin-left:15px;color:#444;white-space:pre-wrap}",
+        "#chatInput{display:flex;border-top:1px solid #ddd}",
+        "#chatInput input{flex:1;padding:10px;border:none;outline:none}",
+        "#chatInput button{background:#4CAF50;color:#fff;border:none;padding:10px 15px;cursor:pointer}",
+        "#chatWindow.minimized{height:40px}",
+        "#chatWindow.minimized #chatBody,#chatWindow.minimized #chatInput{display:none}"
+      ].join("\\n");
+      document.head.appendChild(style);
+
+      var btn=document.createElement('button'); btn.id='chatButton'; btn.setAttribute('aria-label','Open Canine Assistant'); btn.textContent='💬';
+      var win=document.createElement('div'); win.id='chatWindow'; win.setAttribute('role','dialog'); win.setAttribute('aria-label','Canine Assistant');
+      win.innerHTML=[
+        '<div id="chatHeader">🐾 Canine Assistant',
+        '  <span id="notifDot"></span>',
+        '  <div class="buttons"><button id="resetBtn" title="Reset">♻️</button><button id="minimizeBtn" title="Minimize">—</button></div>',
+        '</div>',
+        '<div id="chatBody"><p><em>Hi! Ask me about dog health, training, showing, or breeding.<br>⚠️ Educational only — not a substitute for a veterinarian.</em></p></div>',
+        '<div id="chatInput"><input id="message" type="text" placeholder="Type your question…"><button id="sendBtn" title="Send">➤</button></div>'
+      ].join("");
+
+      document.addEventListener('DOMContentLoaded', function(){
+        document.body.appendChild(btn);
+        document.body.appendChild(win);
+        var minimizeBtn=document.getElementById('minimizeBtn'),
+            resetBtn=document.getElementById('resetBtn'),
+            notifDot=document.getElementById('notifDot'),
+            chatBody=document.getElementById('chatBody'),
+            input=document.getElementById('message'),
+            sendBtn=document.getElementById('sendBtn');
+
+        var BACKEND=new URL('.', (document.currentScript && document.currentScript.src) || window.location.href).origin;
+
+        btn.onclick=function(){ win.style.display=(win.style.display==='none'||!win.style.display)?'flex':'none'; if(win.style.display==='flex' && input) input.focus(); };
+        minimizeBtn.onclick=function(){ win.classList.toggle('minimized'); minimizeBtn.textContent=win.classList.contains('minimized')?'▢':'—'; if(!win.classList.contains('minimized')) notifDot.style.display='none'; };
+        resetBtn.onclick=function(){ chatBody.innerHTML='<p><em>Hi! Ask me about dog health, training, showing, or breeding.<br>⚠️ Educational only — not a substitute for a veterinarian.</em></p>'; if(input) input.value=''; };
+
+        function append(role,text){ var d=document.createElement('div'); d.className=(role==='user'?'user':'bot'); d.textContent=(role==='user'?'You: ':'Assistant: ')+text; chatBody.appendChild(d); chatBody.scrollTop=chatBody.scrollHeight; }
+        async function sendMessage(){
+          var msg=(input&&input.value||'').trim(); if(!msg) return;
+          append('user',msg); if(input) input.value='';
+          try{
+            var r=await fetch(BACKEND+'/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
+            var data=await r.json(); if(!r.ok) throw new Error(data.error||'Request failed');
+            append('assistant',data.reply||''); if(win.classList.contains('minimized')) notifDot.style.display='block';
+          }catch(e){ append('assistant','Sorry—I\\'m having trouble right now.'); console.error(e); }
+        }
+        sendBtn.onclick=sendMessage; if(input) input.addEventListener('keydown',function(e){ if(e.key==='Enter') sendMessage(); });
+      });
+    })();
+  `);
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`   CORS: ${ALLOWED_ORIGIN}`);
+  console.log(`   Path guard: ${ALLOWED_PATH}`);
+});
