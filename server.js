@@ -1,323 +1,234 @@
-// server.js
-// All-Breed Canine Assistant backend (Express + OpenAI)
-// - CORS locked to your WordPress origin
-// - Optional referer/path guard to restrict calls to /all-breed/
-// - Curated veterinary & training sources for citations
-// - "House Notes" (your puppy book content) loaded as first-party guidance
-// - Optional /widget.js for embedding when page builders strip inline <script>
+// server.js — All-Breed Canine Assistant (URLs-only)
+// Dependencies (package.json):
+//   "express", "cors", "dotenv", "express-rate-limit"
+// Env vars (Render):
+//   OPENAI_API_KEY=sk-...
+//   ALLOWED_ORIGIN=https://standardpoodlesofforestlakes.com
+//   ALLOWED_PATH=/all-breed/
 
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 
 dotenv.config();
 
-// -------------------------------
-// Environment / Config
-// -------------------------------
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://standardpoodlesofforestlakes.com";
-const ALLOWED_PATH = process.env.ALLOWED_PATH || "/all-breed/"; // referer must include this path
+const ALLOWED_PATH = process.env.ALLOWED_PATH || "/all-breed/";
 
 if (!OPENAI_API_KEY) {
   console.error("ERROR: OPENAI_API_KEY is not set.");
   process.exit(1);
 }
 
-// ESM-friendly __dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// -------------------------------
-// Express App
-// -------------------------------
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-// CORS: lock to your WP origin
+// CORS — only allow your WordPress site
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // allow server-to-server / local tools
+      if (!origin) return cb(null, true); // allow server-to-server/tools
       cb(null, origin === ALLOWED_ORIGIN);
     },
-    methods: ["POST", "GET", "OPTIONS"],
+    methods: ["POST", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
-    credentials: false,
   })
 );
 
-// Basic rate limit per IP on /chat
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
-});
-app.use("/chat", limiter);
+// Throttle calls to /chat
+app.use("/chat", rateLimit({ windowMs: 60 * 1000, max: 30 }));
 
-// Extra guard: ensure requests come from your specific page
+// Optional: block calls unless they come from your /all-breed/ page
 app.use("/chat", (req, res, next) => {
   const referer = req.get("referer") || "";
-  if (referer.startsWith(ALLOWED_ORIGIN) && referer.includes(ALLOWED_PATH)) {
-    return next();
-  }
+  if (referer.startsWith(ALLOWED_ORIGIN) && referer.includes(ALLOWED_PATH)) return next();
   return res.status(403).json({ error: "Forbidden" });
 });
 
-// -------------------------------
-// Curated Source Maps (Health + Training)
-// -------------------------------
+/* ------------------------------
+   APPROVED SOURCES (your lists)
+------------------------------ */
 
-// HEALTH / VETERINARY buckets
-const VET_SOURCE_MAP = [
+// Veterinary / health (from your master list)
+const VET_CORE = [
+  "https://veterinarypartner.vin.com/",
+  "https://www.acvm.us/",
+  "https://www.acvs.org/",
+  "https://www.merckvetmanual.com/pethealth",
+  "https://www.vet.cornell.edu/departments-centers-and-institutes/canine-health-center",
+  "https://www.vgl.ucdavis.edu/services/dog.php",
+  "https://www.dvm360.com",
+  "https://embarkvet.com",
+  "https://www.ipgicmg.com",
+  "https://www.dacvb.org",
+  "https://www.advim.org",
+  "https://www.aavmc.org",
+  "https://www.acvp.org",
+  "https://www.acvr.org",
+  "https://www.acvecc.org",
+  "https://www.acvpm.org",
+  "https://www.avma.org",
+  "https://www.acvaa.org",
+  "https://acvd.org",
+  "https://vetmeds.org",
+  "https://www.vsmr.org",
+  "https://acvo.org",
+  "https://www.vetspecialists.com",
+  "https://www.acvcp.org",
+];
+
+// Additional authoritative pet-health resources you approved
+const VET_EXTRA = [
+  "https://www.petmd.com/",
+  "https://pets.webmd.com/",
+  "https://www.pethealthnetwork.com/",
+  "https://www.petplace.com/",
+  "https://www.petpoisonhelpline.com/",
+  "https://www.aaha.org/",
+  "https://www.fda.gov/animal-veterinary",
+  "https://www.woah.org/",
+  "https://www.wikivet.net/",
+  "https://capcvet.org/",
+  "https://indoorpet.osu.edu/",
+  "https://www.nlm.nih.gov/services/queries/veterinarymed.html",
+  "https://avdc.org/",
+  "https://vohc.org/",
+];
+
+// Training & certification (credible, positive-reinforcement)
+const TRAINING = [
+  "https://positively.com/",            // Victoria Stilwell Positively
+  "https://www.vsdogtrainingacademy.com/", // Victoria Stilwell Academy
+  "https://www.ccpdt.org/",             // Certification Council for Professional Dog Trainers
+  "https://apdt.com/",                  // Association of Professional Dog Trainers
+  "https://karenpryoracademy.com/",     // Karen Pryor Academy
+  "https://www.dogtrainingrevolution.com/", // Zak George site
+  "https://catchdogtrainers.com/",      // CATCH Trainers
+  "https://goodpup.com/",               // GoodPup (vetted trainers)
+  "https://www.everydogaustin.org/",    // Nonprofit training/behavior org
+  "https://dogsbestfriendtraining.com/" // Established certified trainers
+];
+
+// Topic buckets → url picks (kept short so citations stay focused)
+const TOPIC_MAP = [
   {
     tag: "emergency_poison",
     keywords: ["poison", "toxin", "ate", "ingested", "xylitol", "ibuprofen", "grapes", "rat poison", "chocolate"],
-    links: [
-      "https://www.petpoisonhelpline.com/",
-      "https://www.fda.gov/animal-veterinary",
-    ],
+    urls: ["https://www.petpoisonhelpline.com/", "https://www.fda.gov/animal-veterinary"],
   },
   {
     tag: "parasites",
     keywords: ["flea", "tick", "heartworm", "roundworm", "hookworm", "tapeworm", "giardia", "coccidia", "parasite"],
-    links: [
-      "https://capcvet.org/",
-      "https://www.merckvetmanual.com/pethealth",
-    ],
+    urls: ["https://capcvet.org/", "https://www.merckvetmanual.com/pethealth"],
   },
   {
     tag: "vaccines_preventive",
     keywords: ["vaccine", "vaccination", "rabies", "dhpp", "dhlpp", "bordetella", "lepto", "leptospirosis", "schedule", "puppy shots"],
-    links: [
-      "https://www.avma.org/",
-      "https://www.aaha.org/",
-    ],
+    urls: ["https://www.avma.org/", "https://www.aaha.org/"],
   },
   {
     tag: "genetics_testing",
-    keywords: ["genetic", "dna", "embark", "degenerative myelopathy", "ivdd", "progressive retinal atrophy", "pra", "genotype"],
-    links: [
-      "https://embarkvet.com/",
-      "https://www.vgl.ucdavis.edu/services/dog.php",
-    ],
+    keywords: ["genetic", "dna", "embark", "degenerative myelopathy", "ivdd", "pra", "progressive retinal atrophy"],
+    urls: ["https://embarkvet.com", "https://www.vgl.ucdavis.edu/services/dog.php"],
   },
   {
-    tag: "orthopedics_surgery",
-    keywords: ["tplo", "ccl", "cruciate", "acl", "hip dysplasia", "elbow dysplasia", "patella", "lameness", "orthopedic", "surgery"],
-    links: [
-      "https://www.acvs.org/",
-      "https://ofa.org/",
-    ],
-  },
-  {
-    tag: "behavior_clinical",
-    keywords: ["separation anxiety", "aggression", "reactive", "phobia", "behavior medication"],
-    links: [
-      "https://www.dacvb.org/",
-      "https://veterinarypartner.vin.com/",
-    ],
+    tag: "orthopedics",
+    keywords: ["tplo", "ccl", "cruciate", "acl", "hip dysplasia", "elbow dysplasia", "patella", "lameness", "orthopedic"],
+    urls: ["https://www.acvs.org/", "https://ofa.org/"],
   },
   {
     tag: "dermatology_allergy",
     keywords: ["itch", "allergy", "atopy", "hot spot", "dermatitis", "yeast", "pyoderma"],
-    links: [
-      "https://acvd.org/",
-      "https://www.merckvetmanual.com/pethealth",
-    ],
-  },
-  {
-    tag: "dentistry",
-    keywords: ["tooth", "dental", "periodontal", "gingivitis", "extraction", "tartar", "vohc"],
-    links: [
-      "https://avdc.org/",
-      "https://vohc.org/",
-    ],
+    urls: ["https://acvd.org/", "https://www.merckvetmanual.com/pethealth"],
   },
   {
     tag: "ophthalmology",
     keywords: ["eye", "entropion", "distichia", "cataract", "cornea", "uveitis", "glaucoma"],
-    links: [
-      "https://acvo.org/",
-      "https://www.merckvetmanual.com/pethealth",
-    ],
-  },
-];
-
-// GENERAL owner-friendly health references
-const VET_FALLBACK_LINKS = [
-  "https://veterinarypartner.vin.com/",
-  "https://www.merckvetmanual.com/pethealth",
-  "https://www.avma.org/",
-];
-
-// TRAINING / HANDLING buckets (credible, positive-reinforcement centered)
-const TRAIN_SOURCE_MAP = [
-  {
-    tag: "foundations_puppy",
-    keywords: ["puppy", "housebreaking", "house training", "crate", "socialization", "bite", "nipping", "chewing"],
-    links: [
-      "https://positively.com/", // Victoria Stilwell Positively
-      "https://www.ccpdt.org/",  // Certification Council for Professional Dog Trainers
-    ],
+    urls: ["https://acvo.org/", "https://www.merckvetmanual.com/pethealth"],
   },
   {
-    tag: "methods_clicker",
+    tag: "behavior_clinical",
+    keywords: ["separation anxiety", "aggression", "reactive", "phobia", "behavior medication"],
+    urls: ["https://www.dacvb.org/", "https://veterinarypartner.vin.com/"],
+  },
+  // Training-focused buckets
+  {
+    tag: "puppy_foundations",
+    keywords: ["puppy", "crate", "housebreaking", "house training", "socialization", "bite", "nipping", "chewing", "recall", "heel"],
+    urls: ["https://positively.com/", "https://www.ccpdt.org/"],
+  },
+  {
+    tag: "clicker_methods",
     keywords: ["clicker", "marker", "reinforcement", "shaping", "capturing"],
-    links: [
-      "https://karenpryoracademy.com/",
-      "https://positively.com/",
-    ],
+    urls: ["https://karenpryoracademy.com/", "https://positively.com/"],
   },
   {
-    tag: "trainer_education",
-    keywords: ["certified trainer", "become a trainer", "trainer certification", "credentials", "cpdt", "ka", "ksa"],
-    links: [
-      "https://www.ccpdt.org/",
-      "https://apdt.com/",
-    ],
+    tag: "trainer_credentials",
+    keywords: ["certified trainer", "become a trainer", "trainer certification", "cpdt", "ka", "ksa", "apdt"],
+    urls: ["https://www.ccpdt.org/", "https://apdt.com/"],
   },
   {
-    tag: "competition_basics",
+    tag: "show_compete_basics",
     keywords: ["conformation", "ring", "gait", "stack", "obedience", "rally", "agility"],
-    links: [
-      "https://apdt.com/",
-      "https://positively.com/",
-    ],
+    urls: ["https://apdt.com/", "https://positively.com/"],
   },
 ];
 
-// Owner-friendly training fallback
-const TRAIN_FALLBACK_LINKS = [
-  "https://positively.com/",
-  "https://www.ccpdt.org/",
-];
+// Fallback pools
+const VET_FALLBACK = ["https://veterinarypartner.vin.com/", "https://www.merckvetmanual.com/pethealth", "https://www.avma.org/"];
+const TRAIN_FALLBACK = ["https://positively.com/", "https://www.ccpdt.org/"];
 
-// Choose links by scanning keywords across both maps
-function selectApprovedLinks(message) {
+// Heuristic: decide if question is training-heavy
+const TRAIN_HINTS = ["train", "crate", "socializ", "heel", "sit", "down", "stay", "recall", "gait", "stack", "ring", "obedience", "agility", "rally", "nipping", "biting", "housebreaking"];
+
+// Pick 2–4 URLs to cite based on keywords
+function selectApprovedUrls(message) {
   const text = (message || "").toLowerCase();
 
-  const pick = (MAP, FALLBACK) => {
-    const chosen = [];
-    for (const group of MAP) {
-      if (group.keywords.some((k) => text.includes(k))) {
-        chosen.push(...group.links);
-      }
+  // scan buckets
+  let chosen = [];
+  for (const group of TOPIC_MAP) {
+    if (group.keywords.some((k) => text.includes(k))) {
+      chosen.push(...group.urls);
     }
-    const unique = Array.from(new Set(chosen));
-    return unique.length ? unique.slice(0, 4) : FALLBACK;
-  };
+  }
+  chosen = Array.from(new Set(chosen));
 
-  // Heuristic: if message smells like training/handling → prefer TRAIN sources, else VET
-  const trainingHints = ["train", "crate", "socializ", "heel", "sit", "down", "stay", "recall", "gait", "stack", "ring", "obedience", "agility", "rally", "nipping", "biting", "housebreaking"];
-  const isTraining = trainingHints.some((h) => text.includes(h));
+  if (chosen.length) return chosen.slice(0, 4);
 
-  const links = isTraining
-    ? pick(TRAIN_SOURCE_MAP, TRAIN_FALLBACK_LINKS)
-    : pick(VET_SOURCE_MAP, VET_FALLBACK_LINKS);
-
-  // De-duplicate once more (in case overlap across categories)
-  return Array.from(new Set(links)).slice(0, 4);
+  // fallback based on training vs. vet tilt
+  const isTraining = TRAIN_HINTS.some((h) => text.includes(h));
+  const pool = isTraining ? TRAIN_FALLBACK : VET_FALLBACK;
+  return pool.slice(0, 3);
 }
 
-// -------------------------------
-// House Notes (your puppy book content) loader & selector
-// -------------------------------
-const NOTES_DIR = path.join(__dirname, "house_notes");
-
-// Load markdown notes with light front-matter
-function loadHouseNotes() {
-  if (!fs.existsSync(NOTES_DIR)) return [];
-  const files = fs.readdirSync(NOTES_DIR).filter((f) => f.endsWith(".md"));
-  return files.map((fname) => {
-    const raw = fs.readFileSync(path.join(NOTES_DIR, fname), "utf8");
-    // Parse minimal front-matter (optional)
-    const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/m.exec(raw);
-    let meta = { title: fname.replace(".md", ""), tags: [], keywords: [] };
-    let body = raw;
-    if (m) {
-      body = m[2].trim();
-      const fm = m[1];
-      const getList = (key) => {
-        const r = new RegExp(`${key}:\\s*\\[(.*?)\\]`);
-        const s = r.exec(fm)?.[1] || "";
-        return s
-          .split(",")
-          .map((x) => x.trim().replace(/^"|"$/g, ""))
-          .filter(Boolean);
-      };
-      const t = /title:\s*(.+)/.exec(fm)?.[1]?.trim();
-      if (t) meta.title = t;
-      meta.tags = getList("tags");
-      meta.keywords = getList("keywords");
-    }
-    return { id: fname, meta, body };
-  });
-}
-
-const HOUSE_NOTES = loadHouseNotes();
-
-// Score notes by keyword/tag overlap; return top N
-function selectHouseNotes(message, max = 2) {
-  const q = (message || "").toLowerCase();
-  const scored = HOUSE_NOTES.map((n) => {
-    let score = 0;
-    n.meta.keywords?.forEach((k) => {
-      if (q.includes(k.toLowerCase())) score += 3;
-    });
-    n.meta.tags?.forEach((k) => {
-      if (q.includes(k.toLowerCase())) score += 2;
-    });
-    if (n.meta.title && q.includes(n.meta.title.toLowerCase())) score += 1;
-    // tiny fallback: if nothing hit, check if first word appears in body
-    if (score === 0 && q.length) {
-      const first = q.split(/\s+/)[0];
-      if (first && n.body.toLowerCase().includes(first)) score += 1;
-    }
-    return { note: n, score };
-  })
-    .sort((a, b) => b.score - a.score)
-    .filter((x) => x.score > 0)
-    .slice(0, max)
-    .map((x) => x.note);
-
-  return scored;
-}
-
-// -------------------------------
-// OpenAI Chat Completion
-// -------------------------------
-async function chatWithOpenAI({ userMessage, links, houseContext }) {
+/* ------------------------------
+   OpenAI call
+------------------------------ */
+async function askOpenAI(userMessage, urls) {
   const systemPrompt = `
 You are the All-Breed Canine Assistant for dog owners, handlers, and breeders.
 
 FOCUS
-- Health education: rely on approved veterinary bodies (VIN Veterinary Partner, Merck Vet Manual, AVMA, AAHA, FDA CVM, ACV* specialty colleges, CAPC, university vet sites). Use only the provided links in "Approved links" for citations.
-- Training & socialization: positive reinforcement, stepwise plans, and humane methods; reference credible training bodies (CCPDT, VSA, APDT, Karen Pryor Academy) when useful.
+- Health education from reputable veterinary bodies and references.
+- Training & socialization using humane, positive-reinforcement methods.
 - Getting started in showing/competition (AKC/UKC basics).
 - Ethical breeding (pre-breeding health testing, whelping care, responsible placement).
 
 GUARDRAILS
-- Not a substitute for a veterinarian. For urgent, severe, or individualized medical issues, advise contacting a licensed veterinarian or emergency clinic.
-- Do not invent sources. Only cite from the provided approved links.
-- Keep answers clear, kind, and professional.
+- You are not a substitute for a veterinarian. For urgent, severe, or individualized medical issues, advise contacting a licensed veterinarian or emergency clinic.
+- Do NOT invent sources. Only cite from the approved links provided below.
 
 STYLE
-- Start with concise, actionable steps, then brief context.
-- End every answer with a short "Sources" section listing 2–4 of the approved links most relevant to the user’s question.
-
-HOUSE GUIDANCE
-- If a "House guidance" block is provided, treat it as first-party guidance. You may use it freely, but do NOT name or refer to any book or internal source by name.
+- Start with concise, actionable steps; then give brief context.
+- End every answer with a short "Sources" section listing 2–4 of the approved links most relevant to the question.
 `.trim();
 
   const contextMsg =
-    `Approved links relevant to this question:\n` +
-    links.map((l) => `- ${l}`).join("\n");
+    "Approved links relevant to this question:\n" +
+    urls.map((u) => `- ${u}`).join("\n");
 
-  const messages = [
-    { role: "system", content: systemPrompt },
-    { role: "assistant", content: contextMsg
+  const r = await fetch("https://api.openai.com/v1/chat/completions",
